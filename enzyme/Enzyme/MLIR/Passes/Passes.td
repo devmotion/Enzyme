@@ -57,12 +57,28 @@ def PrintActivityAnalysisPass : Pass<"print-activity-analysis"> {
       /*default=*/"false",
       /*description=*/"Whether the return is duplicated"
     >,
+    Option<
+      /*C++ variable name=*/"disableInterproc",
+      /*CLI argument=*/"disable-interproc",
+      /*type=*/"bool",
+      /*default=*/"false",
+      /*description=*/"Disable interprocedural dataflow analysis"
+    >,
   ];
 }
 
 def PrintAliasAnalysisPass : Pass<"test-print-alias-analysis"> {
   let summary = "Print the results of alias analysis";
   let constructor = "mlir::enzyme::createPrintAliasAnalysisPass()";
+  let options = [
+    Option<
+      /*C++ variable name=*/"disableInterproc",
+      /*CLI argument=*/"disable-interproc",
+      /*type=*/"bool",
+      /*default=*/"false",
+      /*description=*/"Disable interprocedural dataflow analysis"
+    >,
+  ];
 }
 
 def EnzymeOpsToMemRefPass : Pass<"convert-enzyme-to-memref"> {

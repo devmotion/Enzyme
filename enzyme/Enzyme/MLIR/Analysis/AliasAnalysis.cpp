@@ -611,11 +611,20 @@ void enzyme::AliasAnalysis::transfer(
       }
     } else if (isa<MemoryEffects::Read>(effect.getEffect())) {
       auto *pointsToSets = getOrCreateFor<PointsToSets>(op, op);
-      for (auto srcClass : getLatticeElement(value)->getAliasClasses()) {
-        const auto &srcPointsTo = pointsToSets->pointsTo.lookup(srcClass);
-        for (AliasClassLattice *result : results) {
-          propagateIfChanged(result,
-                             result->insert(srcPointsTo.getAliasClasses()));
+      AliasClassLattice *srcClassLattice = getLatticeElement(value);
+      // A read of an unknown pointer produces an unknown pointer
+      if (srcClassLattice->isUnknown()) {
+        for (AliasClassLattice *result : results)
+          join(result, *srcClassLattice);
+      } else {
+        for (auto srcClass : srcClassLattice->getAliasClasses()) {
+          const auto &srcPointsTo = pointsToSets->pointsTo.lookup(srcClass);
+          for (AliasClassLattice *result : results) {
+            propagateIfChanged(
+                result, srcPointsTo.isUnknown()
+                            ? result->markUnknown()
+                            : result->insert(srcPointsTo.getAliasClasses()));
+          }
         }
       }
     }

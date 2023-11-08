@@ -148,7 +148,8 @@ struct PrintActivityAnalysisPass
         inferArgActivitiesFromEnzymeAutodiff(callee, autodiff_call,
                                              argActivities, resultActivities);
         enzyme::runDataFlowActivityAnalysis(callee, argActivities,
-                                            /*print=*/true, verbose, annotate);
+                                            /*print=*/true, verbose, annotate,
+                                            disableInterproc);
       }
       return;
     }
@@ -163,7 +164,8 @@ struct PrintActivityAnalysisPass
         initializeArgAndResActivities(callee, argActivities, resultActivities);
 
         enzyme::runDataFlowActivityAnalysis(callee, argActivities,
-                                            /*print=*/true, verbose, annotate);
+                                            /*print=*/true, verbose, annotate,
+                                            disableInterproc);
       });
       return;
     }
@@ -186,7 +188,8 @@ struct PrintActivityAnalysisPass
       initializeArgAndResActivities(callee, argActivities, resultActivities);
 
       enzyme::runDataFlowActivityAnalysis(callee, argActivities,
-                                          /*print=*/true, verbose, annotate);
+                                          /*print=*/true, verbose, annotate,
+                                          disableInterproc);
     }
   }
 };

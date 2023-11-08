@@ -28,7 +28,7 @@ struct PrintAliasAnalysisPass
     : public enzyme::PrintAliasAnalysisPassBase<PrintAliasAnalysisPass> {
 
   void runOnOperation() override {
-    DataFlowSolver solver;
+    DataFlowSolver solver(disableInterproc);
 
     solver.load<enzyme::AliasAnalysis>(&getContext());
     solver.load<enzyme::PointsToPointerAnalysis>();
@@ -87,8 +87,13 @@ struct PrintAliasAnalysisPass
         for (auto arg : funcOp.getArguments()) {
           auto *state = solver.lookupState<enzyme::AliasClassLattice>(arg);
           if (state) {
-            for (auto aliasClass : state->getAliasClasses())
-              funcOp.setArgAttr(arg.getArgNumber(), "enzyme.ac", aliasClass);
+            if (state->isUnknown())
+              funcOp.setArgAttr(arg.getArgNumber(), "enzyme.ac",
+                                StringAttr::get(op->getContext(), "<unknown>"));
+            else {
+              for (auto aliasClass : state->getAliasClasses())
+                funcOp.setArgAttr(arg.getArgNumber(), "enzyme.ac", aliasClass);
+            }
           }
         }
       } else if (op->hasTrait<OpTrait::ReturnLike>() &&

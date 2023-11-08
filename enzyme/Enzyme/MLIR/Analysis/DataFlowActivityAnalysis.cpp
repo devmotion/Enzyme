@@ -894,9 +894,9 @@ void printActivityAnalysisResults(const DataFlowSolver &solver,
 
 void enzyme::runDataFlowActivityAnalysis(
     FunctionOpInterface callee, ArrayRef<enzyme::Activity> argumentActivity,
-    bool print, bool verbose, bool annotate) {
+    bool print, bool verbose, bool annotate, bool disableInterproc) {
   SymbolTableCollection symbolTable;
-  DataFlowSolver solver;
+  DataFlowSolver solver(disableInterproc);
 
   solver.load<enzyme::PointsToPointerAnalysis>();
   solver.load<enzyme::AliasAnalysis>(callee.getContext());
