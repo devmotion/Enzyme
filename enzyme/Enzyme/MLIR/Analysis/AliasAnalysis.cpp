@@ -240,6 +240,12 @@ void enzyme::PointsToPointerAnalysis::visitOperation(Operation *op,
   using llvm::errs;
   join(after, before);
 
+  if (isa<LLVM::NoAliasScopeDeclOp>(op)) {
+    // TODO: This op doesn't implement the MemoryEffectOpInterface. We can
+    // consider adding support for these NoAliasScopeDecl semantics in the
+    // future.
+    return;
+  }
   // If we know nothing about memory effects, record reaching the pessimistic
   // fixpoint and bail.
   auto memory = dyn_cast<MemoryEffectOpInterface>(op);
@@ -678,6 +684,11 @@ LogicalResult getEffectsForExternalCall(
     assert(call->getNumResults() == 1);
     effects.push_back(MemoryEffects::EffectInstance(
         MemoryEffects::Allocate::get(), call->getResult(0)));
+    return success();
+  } else if (callableName == "free") {
+    assert(call.getArgOperands().size() == 1);
+    effects.push_back(MemoryEffects::EffectInstance(
+        MemoryEffects::Free::get(), call.getArgOperands().front()));
     return success();
   }
 
