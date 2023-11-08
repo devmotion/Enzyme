@@ -21,6 +21,45 @@ using namespace mlir;
 using namespace mlir::dataflow;
 using enzyme::AliasClassLattice;
 
+static bool canBeActiveData(Type type) {
+  return isa<FloatType, ComplexType>(type);
+}
+
+// TODO(jacob): optimize how we determine an active pointer instead of
+// repeatedly traversing these sets
+static WalkResult
+traversePointsToSets(const enzyme::PointsToSets &pointsToSets,
+                     const AliasClassLattice &start,
+                     function_ref<WalkResult(DistinctAttr)> processFunction) {
+  std::deque<DistinctAttr> frontier;
+  DenseSet<DistinctAttr> visited;
+  const DenseSet<DistinctAttr> &aliasClasses = start.getAliasClasses();
+  frontier.insert(frontier.end(), aliasClasses.begin(), aliasClasses.end());
+  visited.insert(aliasClasses.begin(), aliasClasses.end());
+  while (!frontier.empty()) {
+    DistinctAttr aliasClass = frontier.front();
+    frontier.pop_front();
+
+    if (processFunction(aliasClass).wasInterrupted())
+      return WalkResult::interrupt();
+
+    const enzyme::AliasClassSet &neighbors =
+        pointsToSets.pointsTo.lookup(aliasClass);
+    for (DistinctAttr neighbor : neighbors.getAliasClasses()) {
+      if (!visited.contains(neighbor)) {
+        visited.insert(neighbor);
+        frontier.push_back(neighbor);
+      }
+    }
+  }
+  return WalkResult::advance();
+}
+
+// TODO: duplicated with alias analysis.
+static bool isPointerLike(Type type) {
+  return isa<LLVM::LLVMPointerType, MemRefType>(type);
+}
+
 /// From LLVM Enzyme's activity analysis, there are four activity states.
 // constant instruction vs constant value, a value/instruction (one and the same
 // in LLVM) can be a constant instruction but active value, active instruction
@@ -319,11 +358,10 @@ public:
     // has value semantics
     for (ForwardValueActivity *result : results) {
       if (joinedResult.isActiveVal())
-        propagateIfChanged(result,
-                           result->join(isa<FloatType, ComplexType>(
-                                            result->getPoint().getType())
-                                            ? joinedResult
-                                            : ValueActivity::getConstant()));
+        propagateIfChanged(
+            result, result->join(canBeActiveData(result->getPoint().getType())
+                                     ? joinedResult
+                                     : ValueActivity::getConstant()));
       else
         propagateIfChanged(result, result->join(joinedResult));
     }
@@ -438,17 +476,7 @@ public:
         auto *ptrAliasClass = getOrCreateFor<AliasClassLattice>(op, value);
         forEachAliasedAlloc(ptrAliasClass, [&](DistinctAttr alloc) {
           if (before.hasActiveData(alloc)) {
-            for (OpResult opResult : op->getResults()) {
-              // Mark the result as (forward) active
-              // TODO: We might need type analysis here
-              // Structs and tensors also have value semantics
-              if (isa<FloatType, ComplexType>(opResult.getType())) {
-                auto *valueState = getOrCreate<ForwardValueActivity>(opResult);
-                propagateIfChanged(
-                    valueState,
-                    valueState->join(ValueActivity::getActiveVal()));
-              }
-            }
+            markDataResultsActive(op);
 
             if (auto linalgOp = dyn_cast<linalg::LinalgOp>(op)) {
               // propagate from input to block argument
@@ -519,6 +547,64 @@ public:
                                     const ForwardMemoryActivity &before,
                                     ForwardMemoryActivity *after) override {
     join(after, before);
+    if (action == CallControlFlowAction::ExternalCallee) {
+      auto pointsToSets = getOrCreateFor<enzyme::PointsToSets>(call, call);
+      bool hasActiveDataOperand =
+          llvm::any_of(call.getArgOperands(), [&](Value operand) {
+            if (getOrCreateFor<ForwardValueActivity>(call, operand)
+                    ->getValue()
+                    .isActiveVal())
+              return true;
+
+            // See if the operand is an active pointer.
+            if (!isPointerLike(operand.getType()))
+              return false;
+
+            auto *operandAliasClasses =
+                getOrCreateFor<AliasClassLattice>(call, operand);
+            WalkResult result = traversePointsToSets(
+                *pointsToSets, *operandAliasClasses, [&](DistinctAttr alloc) {
+                  if (before.hasActiveData(alloc)) {
+                    return WalkResult::interrupt();
+                  }
+                  return WalkResult::advance();
+                });
+            return result.wasInterrupted();
+          });
+
+      // Conservatively assume all pointers may have been actively stored into.
+      if (hasActiveDataOperand) {
+        SmallVector<Value> pointerOperandsAndResults;
+        auto isValuePointerLike = [](Value value) {
+          return isPointerLike(value.getType());
+        };
+        llvm::append_range(
+            pointerOperandsAndResults,
+            llvm::make_filter_range(call.getArgOperands(), isValuePointerLike));
+        llvm::append_range(
+            pointerOperandsAndResults,
+            llvm::make_filter_range(call->getResults(), isValuePointerLike));
+        for (Value ptr : pointerOperandsAndResults) {
+          auto *ptrAliasClass = getOrCreateFor<AliasClassLattice>(call, ptr);
+          forEachAliasedAlloc(ptrAliasClass, [&](DistinctAttr alloc) {
+            propagateIfChanged(after, after->setActiveIn(alloc));
+          });
+        }
+
+        // If the result could be read from one of the inputs
+        markDataResultsActive(call);
+      }
+    }
+  }
+
+  void markDataResultsActive(Operation *op) {
+    for (OpResult result : op->getResults()) {
+      if (canBeActiveData(result.getType())) {
+        auto *valueState = getOrCreate<ForwardValueActivity>(result);
+        propagateIfChanged(valueState,
+                           valueState->join(ValueActivity::getActiveVal()));
+      }
+    }
   }
 
   /// Initialize the entry block with the supplied argument activities.
@@ -611,10 +697,7 @@ public:
           auto *valueState =
               getOrCreateFor<BackwardValueActivity>(op, opResult);
           if (valueState->getValue().isActiveVal()) {
-            auto *ptrAliasClass = getOrCreateFor<AliasClassLattice>(op, value);
-            forEachAliasedAlloc(ptrAliasClass, [&](DistinctAttr alloc) {
-              result |= before->setActiveOut(alloc);
-            });
+            markPointerBackwardsActive(op, value, before);
           }
         }
       }
@@ -624,18 +707,14 @@ public:
         std::optional<Value> copySource = getCopySource(op);
         forEachAliasedAlloc(ptrAliasClass, [&](DistinctAttr alloc) {
           if (stored.has_value() && after.activeDataFlowsOut(alloc)) {
-            if (isa<FloatType, ComplexType>(stored->getType())) {
+            if (canBeActiveData(stored->getType())) {
               auto *valueState = getOrCreate<BackwardValueActivity>(*stored);
               propagateIfChanged(
                   valueState, valueState->meet(ValueActivity::getActiveVal()));
             }
           } else if (copySource.has_value() &&
                      after.activeDataFlowsOut(alloc)) {
-            auto *srcAliasClass =
-                getOrCreateFor<AliasClassLattice>(op, *copySource);
-            forEachAliasedAlloc(srcAliasClass, [&](DistinctAttr srcAlloc) {
-              before->setActiveOut(srcAlloc);
-            });
+            markPointerBackwardsActive(op, *copySource, before);
           } else if (auto linalgOp = dyn_cast<linalg::LinalgOp>(op)) {
             if (after.activeDataFlowsOut(alloc)) {
               for (OpOperand &dpsInit : linalgOp.getDpsInitsMutable()) {
@@ -665,6 +744,51 @@ public:
                                     const BackwardMemoryActivity &after,
                                     BackwardMemoryActivity *before) override {
     meet(before, after);
+    if (action == CallControlFlowAction::ExternalCallee) {
+      bool anyResultIsActiveData =
+          llvm::any_of(call->getResults(), [&](Value result) {
+            return getOrCreateFor<BackwardValueActivity>(call, result)
+                ->getValue()
+                .isActiveVal();
+          });
+      auto *pointsToSets = getOrCreateFor<enzyme::PointsToSets>(call, call);
+      bool anyOperandFlowsOut =
+          llvm::any_of(call.getArgOperands(), [&](Value operand) {
+            if (!isPointerLike(operand.getType()))
+              return false;
+            auto *operandAliasClasses =
+                getOrCreateFor<AliasClassLattice>(call, operand);
+            WalkResult result = traversePointsToSets(
+                *pointsToSets, *operandAliasClasses, [&](DistinctAttr alloc) {
+                  if (after.activeDataFlowsOut(alloc)) {
+                    return WalkResult::interrupt();
+                  }
+                  return WalkResult::advance();
+                });
+            return result.wasInterrupted();
+          });
+      if (anyResultIsActiveData || anyOperandFlowsOut) {
+        for (Value operand : call.getArgOperands()) {
+          if (canBeActiveData(operand.getType())) {
+            auto *valueState = getOrCreate<BackwardValueActivity>(operand);
+            propagateIfChanged(valueState,
+                               valueState->meet(ValueActivity::getActiveVal()));
+          }
+
+          if (isPointerLike(operand.getType())) {
+            markPointerBackwardsActive(call, operand, before);
+          }
+        }
+      }
+    }
+  }
+
+  void markPointerBackwardsActive(ProgramPoint dependent, Value ptr,
+                                  BackwardMemoryActivity *before) {
+    auto *ptrAliasClass = getOrCreateFor<AliasClassLattice>(dependent, ptr);
+    forEachAliasedAlloc(ptrAliasClass, [&](DistinctAttr alloc) {
+      propagateIfChanged(before, before->setActiveOut(alloc));
+    });
   }
 
   void setToExitState(BackwardMemoryActivity *lattice) override {}
@@ -720,35 +844,18 @@ void printActivityAnalysisResults(const DataFlowSolver &solver,
       auto *pointsToSets =
           solver.lookupState<enzyme::PointsToSets>(*returnOps.begin());
       auto *aliasClassLattice = solver.lookupState<AliasClassLattice>(value);
-      // Traverse the points-to sets in a simple BFS
-      std::deque<DistinctAttr> frontier;
-      DenseSet<DistinctAttr> visited;
-      const DenseSet<DistinctAttr> &aliasClasses =
-          aliasClassLattice->getAliasClasses();
-      frontier.insert(frontier.end(), aliasClasses.begin(), aliasClasses.end());
-      visited.insert(aliasClasses.begin(), aliasClasses.end());
-      while (!frontier.empty()) {
-        DistinctAttr aliasClass = frontier.front();
-        frontier.pop_front();
 
-        // It's an active pointer if active data flows in from the forward
-        // direction and out from the backward direction.
-        if (fma->hasActiveData(aliasClass) &&
-            bma->activeDataFlowsOut(aliasClass))
-          return false;
+      WalkResult result = traversePointsToSets(
+          *pointsToSets, *aliasClassLattice, [&](DistinctAttr aliasClass) {
+            // It's an active pointer if active data flows in from the forward
+            // direction and out from the backward direction.
+            if (fma->hasActiveData(aliasClass) &&
+                bma->activeDataFlowsOut(aliasClass))
+              return WalkResult::interrupt();
+            return WalkResult::advance();
+          });
 
-        // Or if it points to a pointer that points to active data
-        const enzyme::AliasClassSet &neighbors =
-            pointsToSets->pointsTo.lookup(aliasClass);
-        for (DistinctAttr neighbor : neighbors.getAliasClasses()) {
-          if (!visited.contains(neighbor)) {
-            visited.insert(neighbor);
-            frontier.push_back(neighbor);
-          }
-        }
-      }
-      // Otherwise, it's constant
-      return true;
+      return !result.wasInterrupted();
     }
 
     return !isActiveData(value);
@@ -931,8 +1038,7 @@ void enzyme::runDataFlowActivityAnalysis(
       for (Value operand : op.getOperands()) {
         auto *returnLattice =
             solver.getOrCreateState<BackwardValueActivity>(operand);
-        // Very basic type inference of the type
-        if (isa<FloatType, ComplexType>(operand.getType())) {
+        if (canBeActiveData(operand.getType())) {
           returnLattice->meet(ValueActivity::getActiveVal());
         }
       }

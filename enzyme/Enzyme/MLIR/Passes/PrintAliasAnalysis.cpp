@@ -90,9 +90,12 @@ struct PrintAliasAnalysisPass
             if (state->isUnknown())
               funcOp.setArgAttr(arg.getArgNumber(), "enzyme.ac",
                                 StringAttr::get(op->getContext(), "<unknown>"));
-            else {
-              for (auto aliasClass : state->getAliasClasses())
-                funcOp.setArgAttr(arg.getArgNumber(), "enzyme.ac", aliasClass);
+            else if (!state->getAliasClasses().empty()) {
+              SmallVector<Attribute> aliasClasses(
+                  state->getAliasClasses().begin(),
+                  state->getAliasClasses().end());
+              funcOp.setArgAttr(arg.getArgNumber(), "enzyme.ac",
+                                ArrayAttr::get(op->getContext(), aliasClasses));
             }
           }
         }
