@@ -47,6 +47,8 @@ class PointsToSets : public dataflow::AbstractDenseLattice {
 public:
   using AbstractDenseLattice::AbstractDenseLattice;
 
+  bool isFullyUnknown() const { return unknown; };
+
   void print(raw_ostream &os) const override;
 
   ChangeResult join(const AbstractDenseLattice &lattice) override;

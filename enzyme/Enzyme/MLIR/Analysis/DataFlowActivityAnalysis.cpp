@@ -843,6 +843,9 @@ void printActivityAnalysisResults(const DataFlowSolver &solver,
 
       auto *pointsToSets =
           solver.lookupState<enzyme::PointsToSets>(*returnOps.begin());
+      if (pointsToSets->isFullyUnknown()) {
+        return false;
+      }
       auto *aliasClassLattice = solver.lookupState<AliasClassLattice>(value);
 
       WalkResult result = traversePointsToSets(

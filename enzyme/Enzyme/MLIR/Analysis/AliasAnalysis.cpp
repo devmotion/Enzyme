@@ -20,6 +20,34 @@ static bool isPointerLike(Type type) {
   return isa<MemRefType, LLVM::LLVMPointerType>(type);
 }
 
+// TODO: Move this somewhere shared
+LogicalResult getEffectsForExternalCall(
+    CallOpInterface call,
+    SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
+  auto symbol = dyn_cast<SymbolRefAttr>(call.getCallableForCallee());
+  if (!symbol)
+    return failure();
+
+  // Functions with known specific behavior.
+  StringRef callableName = symbol.getLeafReference().getValue();
+  if (callableName == "malloc" || callableName == "calloc" ||
+      callableName == "_Znwm") {
+    assert(call->getNumResults() == 1);
+    effects.push_back(MemoryEffects::EffectInstance(
+        MemoryEffects::Allocate::get(), call->getResult(0)));
+    return success();
+  } else if (callableName == "free" || callableName == "_ZdlPv") {
+    assert(call.getArgOperands().size() == 1);
+    effects.push_back(MemoryEffects::EffectInstance(
+        MemoryEffects::Free::get(), call.getArgOperands().front()));
+    return success();
+  } else if (callableName == "printf") {
+    return success();
+  }
+
+  return failure();
+}
+
 ChangeResult enzyme::AliasClassSet::join(const AliasClassSet &other) {
   if (unknown) {
     return ChangeResult::NoChange;
@@ -348,6 +376,12 @@ void enzyme::PointsToPointerAnalysis::visitCallControlFlowTransfer(
       }
       return;
     }
+    SmallVector<MemoryEffects::EffectInstance> effects;
+    if (succeeded(getEffectsForExternalCall(call, effects))) {
+      // This is a known function that doesn't create a new pointer-to-pointer
+      // relationship.
+      return;
+    }
 
     // Analyze the callee generically.
     // A function call may be capturing (storing) any pointers it takes into
@@ -667,32 +701,6 @@ void populateConservativeCallEffects(
     effects.emplace_back(MemoryEffects::Write::get(), argument);
     // TODO: consider having a may-free effect.
   }
-}
-
-// TODO: Move this somewhere shared
-LogicalResult getEffectsForExternalCall(
-    CallOpInterface call,
-    SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
-  auto symbol = dyn_cast<SymbolRefAttr>(call.getCallableForCallee());
-  if (!symbol)
-    return failure();
-
-  // Functions with known specific behavior.
-  StringRef callableName = symbol.getLeafReference().getValue();
-  if (callableName == "malloc" || callableName == "calloc" ||
-      callableName == "_Znwm") {
-    assert(call->getNumResults() == 1);
-    effects.push_back(MemoryEffects::EffectInstance(
-        MemoryEffects::Allocate::get(), call->getResult(0)));
-    return success();
-  } else if (callableName == "free") {
-    assert(call.getArgOperands().size() == 1);
-    effects.push_back(MemoryEffects::EffectInstance(
-        MemoryEffects::Free::get(), call.getArgOperands().front()));
-    return success();
-  }
-
-  return failure();
 }
 
 void enzyme::AliasAnalysis::visitOperation(

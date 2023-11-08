@@ -5,6 +5,7 @@ func.func private @free(%ptr: !llvm.ptr)
 
 // Check that the forward state is being propagated over calls to `malloc` (i.e. that the state is not reset)
 // CHECK-LABEL: @loadstore_malloc
+// CHECK:         "unused": Constant
 // CHECK:         "y": Active
 // CHECK:         "z": Active
 func.func @loadstore_malloc(%x: f64) -> f64 {
@@ -12,6 +13,7 @@ func.func @loadstore_malloc(%x: f64) -> f64 {
     %m1 = call @malloc(%cst) : (i64) -> !llvm.ptr
     llvm.store %x, %m1 : f64, !llvm.ptr
     %m2 = call @malloc(%cst) : (i64) -> !llvm.ptr
+    %m3 = call @malloc(%cst) {tag = "unused"} : (i64) -> !llvm.ptr
     %y = llvm.load %m1 {tag = "y"} : !llvm.ptr -> f64
     call @free(%m1) : (!llvm.ptr) -> ()
     llvm.store %y, %m2 : f64, !llvm.ptr
