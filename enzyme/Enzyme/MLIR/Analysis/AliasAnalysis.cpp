@@ -64,7 +64,17 @@ ChangeResult enzyme::AliasClassSet::join(const AliasClassSet &other) {
     return ChangeResult::Change;
   }
 
+  bool wasRestricted = restricted;
+  // Only defined states can be restricted. TODO: Find a better representation,
+  // this is probably buggy. The merge result is restricted if:
+  //   1. One state is undefined and the other is defined and restricted
+  //   2. Both states are restricted (TODO: and they're the same alias classes?)
+  restricted = (isUndefined() && other.isRestricted()) ||
+               (other.isUndefined() && isRestricted());
+
   ChangeResult result = updateStateToDefined();
+  result |= wasRestricted == restricted ? ChangeResult::NoChange
+                                        : ChangeResult::Change;
   return insert(other.aliasClasses) | result;
 }
 
@@ -360,6 +370,11 @@ void enzyme::PointsToPointerAnalysis::visitOperation(Operation *op,
   // fixpoint and bail.
   auto memory = dyn_cast<MemoryEffectOpInterface>(op);
   if (!memory) {
+    // This op doesn't implement the MemoryEffectOpInterface but we don't want
+    // to throw out previous results.
+    if (isa<LLVM::NoAliasScopeDeclOp>(op)) {
+      return;
+    }
     propagateIfChanged(after, after->markAllPointToUnknown());
     return;
   }
@@ -741,6 +756,9 @@ void enzyme::PointsToPointerAnalysis::setToEntryState(PointsToSets *lattice) {}
 //===----------------------------------------------------------------------===//
 
 void enzyme::AliasClassSet::print(raw_ostream &os) const {
+  if (isRestricted()) {
+    os << "[restricted] ";
+  }
   if (isUnknown()) {
     os << "<unknown>";
   } else if (isUndefined()) {
@@ -752,6 +770,9 @@ void enzyme::AliasClassSet::print(raw_ostream &os) const {
 }
 
 void enzyme::AliasClassLattice::print(raw_ostream &os) const {
+  if (aliasClasses.isRestricted()) {
+    os << "[restricted] ";
+  }
   if (aliasClasses.isUnknown()) {
     os << "Unknown AC";
   } else if (aliasClasses.isUndefined()) {
@@ -822,9 +843,10 @@ void enzyme::AliasAnalysis::setToEntryState(AliasClassLattice *lattice) {
 
         DistinctAttr noaliasClass =
             originalClasses.getOriginalClass(lattice->getPoint(), debugLabel);
-        return propagateIfChanged(lattice,
-                                  lattice->join(AliasClassLattice::single(
-                                      lattice->getPoint(), noaliasClass)));
+        return propagateIfChanged(
+            lattice,
+            lattice->join(AliasClassLattice::single(
+                lattice->getPoint(), noaliasClass, /*restricted=*/true)));
       }
       // TODO: Not safe in general, integers can be a result of ptrtoint. We
       // need a type analysis here I guess?
@@ -892,6 +914,15 @@ void enzyme::AliasAnalysis::transfer(
             if (srcPointsTo.isUnknown()) {
               propagateIfChanged(result, result->markUnknown());
             } else if (srcPointsTo.isUndefined()) {
+              if (latticeElement->isRestricted()) {
+                // The load result of a restricted (noalias) memory location
+                // does not alias with the load source, even if we never see
+                // what was stored into it.
+                auto fresh = AliasClassLattice::single(
+                    result->getPoint(),
+                    originalClasses.getOriginalClass(result->getPoint()));
+                propagateIfChanged(result, result->join(fresh));
+              }
               continue;
             } else {
               propagateIfChanged(result,

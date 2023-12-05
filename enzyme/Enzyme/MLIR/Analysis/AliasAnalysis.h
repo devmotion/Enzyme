@@ -53,7 +53,8 @@ public:
 
   AliasClassSet() : state(State::Undefined) {}
 
-  AliasClassSet(DistinctAttr single) : state(State::Defined) {
+  AliasClassSet(DistinctAttr single, bool restricted = false)
+      : state(State::Defined), restricted(restricted) {
     aliasClasses.insert(single);
   }
 
@@ -77,6 +78,8 @@ public:
   /// is `State::Defined` or the explicit list of classes is empty, but not
   /// both.
   bool isCanonical() const;
+
+  bool isRestricted() const { return isCanonical() && restricted; }
 
   /// Returns an instance of AliasClassSet known not to alias with anything.
   /// This is different from "undefined" and "unknown". The instance is *not* a
@@ -121,6 +124,13 @@ private:
 
   DenseSet<DistinctAttr> aliasClasses;
   State state;
+
+  /// True if this pointer was an argument marked with `llvm.noalias` (i.e.
+  /// restrict). These pointers have the special property that loading a pointer
+  /// from them results in a pointer that does not alias with the source
+  /// pointers, which is a necessary assumption when compiling without full
+  /// program information.
+  bool restricted;
 };
 
 //===----------------------------------------------------------------------===//
@@ -320,8 +330,9 @@ public:
     return aliasClasses.insert(classes);
   }
 
-  static AliasClassLattice single(Value point, DistinctAttr value) {
-    return AliasClassLattice(point, AliasClassSet(value));
+  static AliasClassLattice single(Value point, DistinctAttr value,
+                                  bool restricted = false) {
+    return AliasClassLattice(point, AliasClassSet(value, restricted));
   }
 
   ChangeResult markUnknown() { return aliasClasses.markUnknown(); }
@@ -332,6 +343,8 @@ public:
   bool isUnknown() const { return aliasClasses.isUnknown(); }
 
   bool isUndefined() const { return aliasClasses.isUndefined(); }
+
+  bool isRestricted() const { return aliasClasses.isRestricted(); }
 
   const DenseSet<DistinctAttr> &getAliasClasses() const {
     return aliasClasses.getAliasClasses();
