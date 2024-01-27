@@ -749,14 +749,14 @@ function EnzymeRules.augmented_primal(
         func::Const{typeof(ldiv!)},
         RT::Type{<:Union{Const, DuplicatedNoNeed, Duplicated, BatchDuplicatedNoNeed, BatchDuplicated}},
 
-        A::Annotation{AType},
-        B::Union{Const, DuplicatedNoNeed, Duplicated, BatchDuplicatedNoNeed, BatchDuplicated};
+        A::Annotation{<:Cholesky},
+        B::Union{Const{T}, DuplicatedNoNeed{T}, Duplicated{T}, BatchDuplicatedNoNeed{T}, BatchDuplicated{T}};
         kwargs...
-) where {AType <: Union{Cholesky, Array}}
-
+) where {T <: AbstractVecOrMat}
     ldiv!(A.val, B.val; kwargs...)
 
     cache_Bout = if !isa(A, Const) && !isa(B, Const)
+        @show size(B.val), typeof(B.val)
         if EnzymeRules.overwritten(config)[3]
             copy(B.val)
         else
@@ -765,6 +765,7 @@ function EnzymeRules.augmented_primal(
     else
         nothing
     end
+    @show typeof(cache_Bout)
 
     cache_A = if !isa(B, Const)
         if EnzymeRules.overwritten(config)[2]
@@ -796,14 +797,14 @@ function EnzymeRules.reverse(
     func::Const{typeof(ldiv!)},
     dret,
     cache,
-    A::Annotation{AType},
-    B;
+    A::Annotation{<:Cholesky},
+    B::AbstractVecOrMat;
     kwargs...
-) where {AType <: Union{Cholesky,Array}}
-
+)
     if !isa(B, Const)
 
         (cache_A, cache_Bout) = cache
+        @show size(cache_A), size(cache_Bout)
 
         for b in 1:EnzymeRules.width(config)
 
@@ -816,12 +817,7 @@ function EnzymeRules.reverse(
 
             if !isa(A, Const)
                 dA = EnzymeRules.width(config) == 1 ? A.dval : A.dval[b]
-
-                if AType <: Array
-                    mul!(dA, dB, transpose(cache_Bout), 1, -1)
-                else
-                    mul!(dA.factors, dB, transpose(cache_Bout), 1, -1)
-                end
+                mul!(dA.factors, dB, transpose(cache_Bout), 1, -1)
             end
         end
     end
